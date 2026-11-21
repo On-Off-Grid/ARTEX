@@ -97,7 +97,8 @@ type targetWaiter struct {
 // row and emits the approval card once; later calls for the same key attach to
 // that row and wait on it. A request is durable and host-level: a call that
 // stops waiting (bound elapsed, cancelled) leaves it open, and a later approval
-// still creates the pin. Nothing here ever pins: only Decide does, on a click.
+// still creates the pin. Pins come from Decide, on a click, and from the scope
+// policy (tryScopeAutoPin), recorded as system, for an exact in-scope host.
 //
 // ask is the pending ask of a rule or of the judge for the same call, nil when
 // there is none. It is merged into the first row this call creates, so one
@@ -268,6 +269,18 @@ func (i *Interceptor) openTargetRequest(ctx context.Context, ref db.TargetScopeR
 	}
 	w := &targetWaiter{target: t, id: id, created: created}
 	if !created {
+		return w, nil
+	}
+	// A merged ask belongs to a rule or the judge and needs its human answer, so
+	// only a plain request is ever settled by the scope policy.
+	if ask == nil && i.tryScopeAutoPin(ref, t, id) {
+		activity := db.Activity{
+			Kind:    "intercept_request",
+			Summary: fmt.Sprintf("target %s pinned by scope policy (#%d): exact in-scope host, no human decision", targetName(t), id),
+		}
+		if emit := taskEmitFromCtx(ctx); emit != nil {
+			emit(activity)
+		}
 		return w, nil
 	}
 	if ask != nil {

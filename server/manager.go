@@ -257,7 +257,9 @@ type Manager struct {
 	dir         string
 	pg          *pgdb.DB
 	assets      *pgdb.AssetStore
-	traffic     *traffic.Traffic       // process-wide recording proxy (may be nil)
+	traffic     *traffic.Traffic // process-wide recording proxy (may be nil)
+	scopeMu     sync.Mutex       // guards scopeSnap (scope_enforce.go)
+	scopeSnap   *scopeSnapshot
 	enrich      *enrich.Engine         // engine-side asset auto-completion (DNS/HTTP)
 	interceptor *intercept.Interceptor // user-configured tool-call interception rules
 
@@ -434,6 +436,8 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 	m.interceptor.SetUpstreamProxyCheck(func() bool { return m.GlobalProxy() != "" })
 	// The platform's own endpoints need no target approval.
 	m.interceptor.SetDerivedExemptions(m.targetGateEndpoints)
+	// Exact in-scope hosts may be pinned by policy, only while the proxy enforces scope.
+	m.interceptor.SetScopeAutoPin(m.ScopeAutoPinActive)
 	if proxyAddr != "" {
 		tr, err := traffic.Open(filepath.Join(dir, "traffic"), proxyAddr)
 		if err != nil {
@@ -459,7 +463,8 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 		}
 		if tr != nil {
 			m.traffic = tr
-			m.reloadRewriteRules() // in place before the proxy accepts a connection
+			m.reloadRewriteRules()              // in place before the proxy accepts a connection
+			tr.SetHostPolicy(m.proxyHostPolicy) // inert until proxy_scope_enforcement is on
 			go func() {
 				log.Printf("[traffic] recording proxy on %s (set HTTP_PROXY=%s + trust _ca CA)", proxyAddr, tr.ProxyAddr())
 				if err := tr.Start(); err != nil {

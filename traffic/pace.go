@@ -35,6 +35,9 @@ func (s *sink) Requestheaders(f *mproxy.Flow) {
 	if f.Request.Method == http.MethodConnect || f.Request.URL == nil {
 		return
 	}
+	if s.t != nil && !s.t.scopeInner(f) {
+		return
+	}
 	if _, marked := s.paced.Load(id); marked {
 		pace(f)
 	}

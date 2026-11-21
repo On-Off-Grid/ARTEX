@@ -3835,6 +3835,11 @@ func (s *Server) settingsPayload() map[string]any {
 		"notify_assets_max_shown":  limits.AssetsShown,
 		// Effective target noise profile (off by default): the stored setting, else ARTEX_NOISE_PROFILE.
 		"noise_profile": egress.CurrentProfile().Name,
+		// Scope enforcement (scope_enforce.go): the stored switch, and whether it is in force now.
+		"proxy_scope_enforcement":     s.m.pg.GetBool(settingProxyScopeEnforcement, false),
+		"proxy_scope_active":          s.m.ProxyScopeActive(),
+		"target_scope_autopin":        s.m.pg.GetBool(settingTargetScopeAutoPin, false),
+		"target_scope_autopin_active": s.m.ScopeAutoPinActive(),
 	}
 }
 
@@ -3879,7 +3884,11 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		TrafficCapture      *bool `json:"traffic_capture"`
 		AgentTrafficBinding *bool `json:"agent_traffic_binding"`
-		LLMRecord           *bool `json:"llm_record"` // LLM recording switch (default off); takes effect immediately, no agent rebuild needed
+		// Scope enforcement in the recording proxy, and policy pins for exact
+		// in-scope hosts (scope_enforce.go). Both take effect within seconds.
+		ProxyScopeEnforcement *bool `json:"proxy_scope_enforcement"`
+		TargetScopeAutoPin    *bool `json:"target_scope_autopin"`
+		LLMRecord             *bool `json:"llm_record"` // LLM recording switch (default off); takes effect immediately, no agent rebuild needed
 		// Web search. WebSearchEnabled/Backend toggle the tool + backend; BraveKey/TavilyKey/KeenableKey
 		// are optional — omit (null) to leave a stored key untouched, send "" to clear. The Keenable
 		// key is optional even when its backend is selected: empty uses the keyless public endpoint.
@@ -4070,6 +4079,22 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 500, err.Error())
 			return
 		}
+	}
+	for key, val := range map[string]*bool{
+		settingProxyScopeEnforcement: req.ProxyScopeEnforcement,
+		settingTargetScopeAutoPin:    req.TargetScopeAutoPin,
+	} {
+		if val == nil {
+			continue
+		}
+		if err := s.m.pg.SetBool(key, *val); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		log.Printf("[scope] %s set to %v by %s", key, *val, s.approver(r))
+	}
+	if req.ProxyScopeEnforcement != nil {
+		s.m.currentScope(true)
 	}
 	if req.TrafficCapture != nil {
 		if err := s.m.SetTrafficEnabled(*req.TrafficCapture); err != nil {
