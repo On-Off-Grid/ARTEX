@@ -214,6 +214,9 @@ type Interceptor struct {
 	// derivedExempt lists the endpoints of the platform's own services (nil =
 	// none). Injected by the server layer. See SetDerivedExemptions.
 	derivedExempt func() []string
+	// scopeAutoPin reports whether the scope policy may pin a task's exact
+	// in-scope hosts without a human (nil = never). See SetScopeAutoPin.
+	scopeAutoPin func() bool
 	// targets is what the target gate reads and writes; resolve resolves the
 	// names it checks. firstUse holds the exemptions and pin versions whose first
 	// use this process has logged.

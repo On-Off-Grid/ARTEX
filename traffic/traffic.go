@@ -226,6 +226,9 @@ type Traffic struct {
 	// rewriteRules is the compiled snapshot of the rewrite rules, replaced as a
 	// whole by SetRewriteRules and applied by the sink (rewrite_flow.go).
 	rewriteRules atomic.Pointer[rewrite.Set]
+	// hostPolicy is the scope policy checked before a request is forwarded
+	// (scope.go); nil forwards everything.
+	hostPolicy atomic.Pointer[HostPolicy]
 	// snaps keeps the original of each request a rule rewrote until its
 	// exchange is recorded (rewrite_flow.go). Nil on the zero value.
 	snaps *snapTable
@@ -287,6 +290,9 @@ func Open(dir, addr string) (*Traffic, error) {
 	p.SetShouldInterceptRule(func(req *http.Request) bool {
 		return !t.tunneling(hostOnly(req.Host))
 	})
+	// Scope enforcement runs before any dial (scope.go). The hook is the
+	// library's proxy-auth entry point, used here only to refuse targets.
+	p.SetAuthProxy(t.scopeEntry)
 	p.AddAddon(&sink{t: t})
 	t.proxy = p
 	t.sweeping.Go(t.sweepSnapshots) // stops on t.closed; Close waits for it

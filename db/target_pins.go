@@ -53,8 +53,9 @@ const (
 	TargetPinRevokedConversationDelete = "conversation_deleted"
 )
 
-// TargetPin is one row of target_pins: a host and port a human approved for one
-// scope, with the addresses that were shown at approval time. Port 0 means the
+// TargetPin is one row of target_pins: a host and port a human (or, with
+// decided_by ScopePolicyApprover, the scope policy) approved for one scope,
+// with the addresses that were shown at approval time. Port 0 means the
 // port was not declared and covers every port of the host.
 type TargetPin struct {
 	ID             int64     `json:"id"`
@@ -256,6 +257,16 @@ func (d *DB) TargetRequestKey(id int64) (string, error) {
 	return key.String, err
 }
 
+// ScopePolicyApprover is the approver of a pin the scope policy created, never
+// a human: the request named an exact in-scope host of its task.
+const ScopePolicyApprover = "system:scope"
+
+// targetDecider is who settles a target request: the actor class written to
+// decided_by, and the reason an approval records.
+type targetDecider struct{ actor, allowReason string }
+
+var humanTargetDecider = targetDecider{"human", "user approved the target; the displayed addresses were pinned"}
+
 // ResolveTargetRequest settles an open target request with a human decision, in
 // one transaction. Allowed pins the addresses the request displayed: the active
 // pin of the same key, if any, becomes superseded and a new version holds its
@@ -265,6 +276,49 @@ func (d *DB) TargetRequestKey(id int64) (string, error) {
 // the row is not an open target request. If the pin cannot be written the row
 // stays pending.
 func (d *DB) ResolveTargetRequest(id int64, allowed bool, approver, remoteAddr string) (pin *TargetPin, ok bool, err error) {
+	return d.resolveTargetRequest(id, allowed, humanTargetDecider, approver, remoteAddr)
+}
+
+// AutoPinTargetRequest allows an open target request on behalf of the scope
+// policy. The pin is the one an approval writes, but decided_by is system and
+// the approver ScopePolicyApprover, so it never reads as a human decision.
+func (d *DB) AutoPinTargetRequest(id int64, policy string) (pin *TargetPin, ok bool, err error) {
+	return d.resolveTargetRequest(id, true, targetDecider{"system", "pinned by scope policy: " + policy}, ScopePolicyApprover, "")
+}
+
+// AllActiveTargetPins returns the active pins of every conversation and of
+// every task that is not archived or deleted.
+func (d *DB) AllActiveTargetPins() ([]*TargetPin, error) {
+	return queryTargetPins(d, `SELECT `+targetPinCols+` FROM target_pins
+WHERE status='active' AND (task_id IS NULL OR EXISTS
+  (SELECT 1 FROM tasks t WHERE t.id = target_pins.task_id AND t.deleted_at IS NULL))`)
+}
+
+// TargetRefusedByHuman reports whether a human already refused (host, port) in
+// scope, by denying a request for it or revoking its pin. The scope policy
+// never overrules either.
+func (d *DB) TargetRefusedByHuman(scope TargetScopeRef, host string, port int) (bool, error) {
+	if err := scope.check(); err != nil {
+		return false, err
+	}
+	taskID, _ := scope.pendingScope()
+	taskKey := ""
+	if taskID != nil {
+		taskKey = *taskID
+	}
+	var refused bool
+	if err := d.QueryRow(`SELECT EXISTS (SELECT 1 FROM intercept_pending
+WHERE COALESCE(task_id,'')=$1 AND COALESCE(conversation_id,0)=$2 AND target_key=$3
+  AND status='denied' AND decided_by='human')`, taskKey, scope.ConversationID, TargetKey(host, port)).Scan(&refused); err != nil || refused {
+		return refused, err
+	}
+	err := d.QueryRow(`SELECT EXISTS (SELECT 1 FROM target_pins
+WHERE `+targetPinScope+` AND host=$3 AND port IN ($4, 0) AND status=$5 AND revoked_reason=$6)`,
+		scope.TaskID, scope.ConversationID, host, port, TargetPinRevoked, TargetPinRevokedByOperator).Scan(&refused)
+	return refused, err
+}
+
+func (d *DB) resolveTargetRequest(id int64, allowed bool, by targetDecider, approver, remoteAddr string) (pin *TargetPin, ok bool, err error) {
 	tx, err := d.Begin()
 	if err != nil {
 		return nil, false, err
@@ -301,7 +355,7 @@ WHERE id=$1 AND status='pending' AND target_key IS NOT NULL FOR UPDATE`, id).Sca
 		if pin, err = writeTargetPin(tx, scope, id, &audit.Targets[0], approver, remoteAddr); err != nil {
 			return nil, false, err
 		}
-		status, action, reason = "allowed", "allow", "user approved the target; the displayed addresses were pinned"
+		status, action, reason = "allowed", "allow", by.allowReason
 		// A plain target request is host-level: no single call owns its result.
 		execution = "unknown"
 		if audit.MergedAsk && audit.Correlation == "exact" {
@@ -324,8 +378,8 @@ WHERE id=$1 AND status='pending' AND target_key IS NOT NULL FOR UPDATE`, id).Sca
 	if err != nil {
 		return nil, false, err
 	}
-	if _, err := tx.Exec(`UPDATE intercept_pending SET status=$2, decided_at=NOW(), decided_by='human',
-	audit=COALESCE(audit,'{}'::jsonb) || $3::jsonb WHERE id=$1`, id, status, patch); err != nil {
+	if _, err := tx.Exec(`UPDATE intercept_pending SET status=$2, decided_at=NOW(), decided_by=$4,
+	audit=COALESCE(audit,'{}'::jsonb) || $3::jsonb WHERE id=$1`, id, status, patch, by.actor); err != nil {
 		return nil, false, err
 	}
 	if err := tx.Commit(); err != nil {
