@@ -61,4 +61,7 @@ require (
 	modernc.org/memory v1.11.0 // indirect
 )
 
-replace github.com/Autumn-27/norma => github.com/BaaRai/Norma v0.4.11
+// Fork of BaaRai/Norma v0.4.11 that adds Anthropic prompt-cache breakpoints on
+// the tool block and the stable message prefix; upstream caches only the system
+// prompt. Everything else, and every other provider, is unchanged.
+replace github.com/Autumn-27/norma => github.com/On-Off-Grid/Norma v0.4.11-onoffgrid.1
